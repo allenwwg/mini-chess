@@ -1,0 +1,30 @@
+_deps/
+__pycache__/
+*.pyc
+*.pyo
+
+# Pikafish 引擎与 NNUE 权重（大二进制，需单独下载）
+pikafish/
+
+# 对弈/定级数据与日志
+data/
+tools/*.out
+tools/*.err
+*.stderr.log
+
+# 构建产物
+egtb_build/
+*.obj
+*.exe
+*.log
+
+# 临时诊断/测试残留
+_server.err
+_server.out
+_uci_in.txt
+_probe_*.py
+_diag_*.py
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
