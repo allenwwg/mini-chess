@@ -185,4 +185,37 @@ This tests:
 
 ---
 
+## 🔧 UCI / Pikafish Match Driver
+
+The engine exposes a UCI interface (`uci_interface.py`, ICCS moves) usable from any
+Chinese-chess GUI, and a match driver (`tools/match_vs_pikafish.py`) that plays two
+UCI engines against each other with an in-process arbiter. Pikafish binaries/NNUE
+are not committed (download separately into `pikafish/`).
+
+```bash
+# UCI engine (GUI command):
+python uci_interface.py
+
+# 100-game rating vs Pikafish (300ms/move), abnormal games replayed:
+python tools/match_vs_pikafish.py --engine2 "pikafish/Pikafish-Windows-x86-64-universal.exe" \
+    --games 100 --movetime 300 --max-plies 200 --max-retries 3 --out data/match100.json
+```
+
+Rating result (2026-11): **0W / 0D / 99L** (1 voided) vs Pikafish at 300ms/move —
+a clear strength gap to a top NNUE engine.
+
+## 🧪 P0 Search Enhancements (isolated A/B)
+
+Five search fixes are behind switches in `mini_chess.py` (all default-on, set a
+switch to `False` to restore old behavior): `fix_nmp_min_window`,
+`use_root_best_ordering`, `progressive_aspiration`, `unify_mate_ply`,
+`clear_tt_on_new_game`. Regression: `python test_search_enhance.py` (7 tests).
+
+Isolated A/B (`tools/ab_search_enhance.py`, 40 games, 200ms/move, randomized
+openings, same code with only the switches toggled): **NEW 15W / 12D / 13OLD**,
+score 52.5% (Wilson 95% CI [37.5, 67.1]) — the CI crosses 50%: the fixes are
+correct but **not statistically proven to gain strength** at this sample size.
+
+---
+
 **Enjoy playing Chinese Chess! 🎮♟️**

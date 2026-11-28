@@ -1,0 +1,19 @@
+P0 search enhancements (5 isolated switches) + A/B validation
+
+- mini_chess.py: 5 switchable fixes, all default-on for A/B reproducibility:
+  1) fix_nmp_min_window: null-move zero window now symmetric for minimizing
+     nodes (alpha,alpha+1) instead of the broken (beta-1,beta)
+  2) use_root_best_ordering: carry previous iteration's best move to root front
+  3) progressive_aspiration: widen window by direction on fail instead of
+     re-searching whole depth with full window; removes dead search_failed var
+  4) unify_mate_ply: quiescence uses absolute ply for mate distance, matching
+     alpha_beta_search (was using local quiescence depth)
+  5) clear_tt_on_new_game: clear TT/killer/history/position history in init_board
+- test_search_enhance.py: 7 regression tests locking all 5 switch behaviors
+- tools/ab_search_enhance.py: isolated in-process A/B (only switches differ),
+  randomized openings for independent positions
+- README: document UCI/match driver and P0 enhancements
+
+A/B (40 games, 200ms/move): NEW 15W/12D/13OLD, score 52.5% Wilson95% CI
+[37.5,67.1] crosses 50% => fixes correct but strength gain not statistically
+proven at this sample. Core tests all pass (regression/uci/uci_extended).

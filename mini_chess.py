@@ -150,6 +150,21 @@ class ChineseChess:
         self.delta_margin = 200
         self.delta_min_window = 1000
 
+        # ===== P0 搜索增强开关（新增，均可用开关回退做同代码单变量 A/B）=====
+        # #1 Null Move 极小方零窗口：旧代码极小方用 (beta-1,beta) 探测却按 <=alpha 裁剪，
+        #    裁剪几乎失效。True=极小方改用 (alpha,alpha+1) 对称零窗口。
+        self.fix_nmp_min_window = True
+        # #2 根着法跨层复用：上一层 best_move 置于下一层根搜索首位，改善排序。
+        self.use_root_best_ordering = True
+        # #2b Aspiration 渐进加窗：失败时按方向扩窗再试，而非整层直接全窗口重搜。
+        self.progressive_aspiration = True
+        # #3 将死距离口径统一：quiescence 传入绝对 ply，与 alpha_beta 同源。
+        #    旧代码 quiescence 用自身局部 depth，杀棋分与主线不可比。
+        self.unify_mate_ply = True
+        # #4 新局清理搜索缓存：init_board 时清 TT/killer/history/位置历史，
+        #    避免同一实例连续多局时旧局缓存污染。
+        self.clear_tt_on_new_game = True
+
         # Killer moves: [ply][killer_index] - 存储每层的2个killer moves
         self.max_ply = 64
         self.killer_moves = [[None, None] for _ in range(self.max_ply)]
@@ -264,6 +279,18 @@ class ChineseChess:
 
     def init_board(self):
         """初始化棋盘"""
+        # 新局清理搜索缓存（#4）：同一实例连续多局时，旧局的 TT/killer/history/
+        # 位置历史会污染新局搜索。构造期（self.transposition_table 刚建立）也安全。
+        if self.clear_tt_on_new_game:
+            self.transposition_table.clear()
+            self.search_generation = 0
+            self.killer_moves = [[None, None] for _ in range(self.max_ply)]
+            self.history_table = {}
+            self.position_history = []
+            self.check_history = []
+            self.halfmove_clock = 0
+            self.halfmove_history = []
+
         # 红方布局 (0-3行)
         self.board[0] = ['R', 'H', 'B', 'A', 'K', 'A', 'B', 'H', 'R']
         self.board[1] = ['.', '.', '.', '.', '.', '.', '.', '.', '.']
@@ -751,8 +778,10 @@ class ChineseChess:
             return 0  # 重复局面判和
 
         # 叶子节点 - 使用quiescence搜索（沿用当前节点的极大/极小方）
+        # 传入绝对 ply 供将死分数口径统一（#3）
         if depth == 0:
-            return self.quiescence_search(alpha, beta, 0, start_time, maximizing_player)
+            return self.quiescence_search(alpha, beta, 0, start_time, maximizing_player,
+                                          ply=ply)
 
         # Null Move Pruning - 在非PV节点且不在将军状态下尝试
         # 只在深度足够且允许null move时使用
@@ -762,12 +791,18 @@ class ChineseChess:
 
             # 使用减少的深度搜索（R=2）
             # 注意：本引擎用绝对分数（红正黑负），不能用 negamax 的 -score/-beta。
-            # maximizing_player 随"轮到谁"取反，窗口保持不变。
+            # 零窗口须按节点类型对称：极大方检验"能否>=beta"→(beta-1,beta)；
+            # 极小方检验"能否<=alpha"→(alpha,alpha+1)。旧代码极小方也用(beta-1,beta)
+            # 却按 <=alpha 裁剪，窗口与判据错配，极小方裁剪基本失效（#1）。
             R = 2
+            if self.fix_nmp_min_window and not maximizing_player:
+                null_alpha, null_beta = alpha, alpha + 1
+            else:
+                null_alpha, null_beta = beta - 1, beta
             null_score = self.alpha_beta_search(
                 depth - R - 1,
-                beta - 1,
-                beta,  # 零窗口，检验能否>=beta
+                null_alpha,
+                null_beta,
                 not maximizing_player,
                 start_time,
                 ply + 1,
@@ -1080,29 +1115,29 @@ class ChineseChess:
         # 走法排序
         moves = self.order_moves(moves, 0)
 
+        is_red = (self.current_player == 'red')
         for depth in range(1, self.search_depth + 1):
-            # Aspiration Windows: Use narrow window around previous best score
+            # #2 根着法跨层复用：上一层 best_move 置于首位。根窗口每层重排，
+            # 上一层的 PV 首要候选优先搜索可改善 PVS/LMR 的裁剪效率。
+            if self.use_root_best_ordering and best_move is not None and best_move in moves:
+                moves = [best_move] + [m for m in moves if m != best_move]
+
+            # Aspiration Windows（#2b 渐进加窗：失败时按方向扩窗再试，而非整层全窗重搜）
             if depth == 1:
-                # First iteration: full window
                 aspiration_alpha = float('-inf')
                 aspiration_beta = float('inf')
                 use_aspiration = False
             else:
-                # Use aspiration window around previous best value
-                window = 50  # About half a pawn in our scale
-                if self.current_player == 'red':
-                    aspiration_alpha = best_value - window
-                    aspiration_beta = best_value + window
-                else:
-                    aspiration_alpha = best_value - window
-                    aspiration_beta = best_value + window
+                window = 50  # 约半个兵
+                aspiration_alpha = best_value - window
+                aspiration_beta = best_value + window
                 use_aspiration = True
 
-            # Search with aspiration window (may need to re-search)
-            search_failed = False
-            for attempt in range(2):  # Max 2 attempts (aspiration, then full)
+            # 渐进加窗最多 4 次尝试（50→200→800→全窗），旧行为仅 2 次（窄窗→全窗）
+            max_attempts = 4 if (use_aspiration and self.progressive_aspiration) else 2
+            for attempt in range(max_attempts):
                 current_best_move = None
-                current_best_value = float('-inf') if self.current_player == 'red' else float('inf')
+                current_best_value = float('-inf') if is_red else float('inf')
 
                 for move in moves:
                     start_row, start_col, end_row, end_col = move
@@ -1112,7 +1147,7 @@ class ChineseChess:
                         depth - 1,
                         aspiration_alpha,
                         aspiration_beta,
-                        self.current_player == 'red',
+                        self.current_player == 'red',  # make_move 后 current_player 已是对方（子节点）
                         start_time,
                         ply=1,
                         allow_null_move=True,
@@ -1126,30 +1161,32 @@ class ChineseChess:
                         self._effective_time_limit = None
                         return best_move or moves[0]
 
-                    if (self.current_player == 'red' and eval_score > current_best_value) or \
-                            (self.current_player == 'black' and eval_score < current_best_value):
+                    if (is_red and eval_score > current_best_value) or \
+                            (not is_red and eval_score < current_best_value):
                         current_best_value = eval_score
                         current_best_move = move
 
-                # Check if aspiration window failed
-                if use_aspiration and attempt == 0:
-                    # Check if we need to re-search with full window
-                    if (self.current_player == 'red' and
-                        (current_best_value <= aspiration_alpha or current_best_value >= aspiration_beta)):
-                        # Aspiration window failed for red, re-search with full window
-                        aspiration_alpha = float('-inf')
-                        aspiration_beta = float('inf')
-                        search_failed = True
-                        continue
-                    elif (self.current_player == 'black' and
-                          (current_best_value <= aspiration_alpha or current_best_value >= aspiration_beta)):
-                        # Aspiration window failed for black, re-search with full window
-                        aspiration_alpha = float('-inf')
-                        aspiration_beta = float('inf')
-                        search_failed = True
+                # 判断 aspiration 是否越界
+                if use_aspiration and (current_best_value <= aspiration_alpha or
+                                       current_best_value >= aspiration_beta):
+                    if attempt < max_attempts - 1:
+                        if self.progressive_aspiration:
+                            # 按失败方向扩窗 4 倍；到最后一轮仍未收敛则全窗
+                            if attempt == max_attempts - 2:
+                                aspiration_alpha = float('-inf')
+                                aspiration_beta = float('inf')
+                            else:
+                                w = aspiration_beta - best_value if current_best_value >= aspiration_beta \
+                                    else best_value - aspiration_alpha
+                                w *= 4
+                                aspiration_alpha = best_value - w
+                                aspiration_beta = best_value + w
+                        else:
+                            # 旧行为：第一次失败即整层全窗重搜
+                            aspiration_alpha = float('-inf')
+                            aspiration_beta = float('inf')
                         continue
 
-                # Success or final attempt
                 break
 
             if current_best_move:
@@ -1265,11 +1302,15 @@ class ChineseChess:
 
         return moves
 
-    def quiescence_search(self, alpha, beta, depth, start_time, maximizing_player=True):
+    def quiescence_search(self, alpha, beta, depth, start_time, maximizing_player=True, ply=0):
         """静态搜索 - 与 alpha_beta_search 同一套绝对分数口径（红正黑负）。
 
         注意：evaluate_board 返回的是"红方视角"分数，因此不能再用
         negamax 的 -score/-beta/-alpha 取负写法，否则黑方节点会符号反转。
+
+        ply 为距根的绝对半回合数（#3）：将死分数须与 alpha_beta_search 同源用
+        MATE-ply；旧代码用 quiescence 自身局部 depth，导致同一杀棋在两条路径
+        分数不同，引擎可能舍近求远。unify_mate_ply=False 保留旧行为供 A/B。
         """
         self.nodes_searched += 1
 
@@ -1305,7 +1346,9 @@ class ChineseChess:
             if in_check:
                 # 与 alpha_beta_search 同源量级; 开关关闭时保留旧绝对值
                 mv = self.MATE_VALUE if self.use_mate_score else 100000
-                return (-mv + depth) if maximizing_player else (mv - depth)
+                # #3 将死距离用绝对 ply，与主线一致；关闭时用局部 depth（旧行为）
+                mate_ply = ply if self.unify_mate_ply else depth
+                return (-mv + mate_ply) if maximizing_player else (mv - mate_ply)
             return stand_pat
 
         # 排序吃子走法
@@ -1335,7 +1378,7 @@ class ChineseChess:
 
             # 轮到对方，maximizing 取反；alpha/beta 不取负（绝对分数口径）
             score = self.quiescence_search(
-                alpha, beta, depth + 1, start_time, not maximizing_player
+                alpha, beta, depth + 1, start_time, not maximizing_player, ply=ply + 1
             )
 
             self.undo_move(start_row, start_col, end_row, end_col, captured_piece)
