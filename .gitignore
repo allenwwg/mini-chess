@@ -24,6 +24,7 @@ _server.out
 _uci_in.txt
 _probe_*.py
 _diag_*.py
+_commit_msg.txt
 
 # 编辑器/系统
 .DS_Store
